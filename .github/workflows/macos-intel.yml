@@ -1,0 +1,71 @@
+name: macos-intel-build
+
+# Builds an Intel (x86_64) macOS DMG on a native Intel runner.
+# PyInstaller sidecars cannot be cross-compiled, so the runner must be x64.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version; must match package.json / tauri.conf.json / Cargo.toml"
+        required: true
+        default: "0.8.4"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: macos-15-intel
+    env:
+      MACOSX_DEPLOYMENT_TARGET: "12.0"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Verify version consistency
+        run: python3 scripts/check-version.py --expected "${{ inputs.version }}"
+
+      - run: npm ci
+
+      - name: Build sidecars
+        run: python3 scripts/build-sidecars.py
+
+      - name: Assert sidecars are Intel
+        run: |
+          file src-tauri/binaries/* | grep -q x86_64
+          ls -l src-tauri/binaries
+
+      - name: Build DMG
+        run: >
+          npx tauri build
+          --target x86_64-apple-darwin
+          --config src-tauri/tauri.preview.macos.conf.json
+
+      - name: Verify bundle (arm64 assertion flipped to x86_64)
+        run: |
+          sed -i '' 's/"arm64"/"x86_64"/g' scripts/verify-bundle.sh
+          bash scripts/verify-bundle.sh \
+            "src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Keysmith Switch.app"
+
+      - name: Report minimum macOS version
+        run: |
+          otool -l \
+            "src-tauri/target/x86_64-apple-darwin/release/bundle/macos/Keysmith Switch.app/Contents/MacOS/keysmith-switch" \
+            | grep -A3 LC_BUILD_VERSION || true
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: keysmith-switch-${{ inputs.version }}-macos-x86_64
+          if-no-files-found: error
+          path: src-tauri/target/x86_64-apple-darwin/release/bundle/dmg/*.dmg
